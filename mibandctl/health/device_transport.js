@@ -4,9 +4,10 @@ var contact = null;
 var manager = null;
 var model = null;
 var did = null;
-var rawHook = null;
+var callbackRefs = {};
 var closed = false;
 var pending = null;
+var nextRequestToken = 1;
 
 function bytesFromBase64(value) {
   return Java.use('android.util.Base64').decode(value, 0);
@@ -44,6 +45,7 @@ function decodeHeader(data) {
     else throw new Error('unsupported protobuf header wire type');
     if (index > bytes.length) throw new Error('truncated protobuf header');
   }
+  if (result.subtype === undefined) result.subtype = 0;
   return result;
 }
 
@@ -51,56 +53,61 @@ function connected() {
   try { return model !== null && model.isDeviceConnected(); } catch (_) { return false; }
 }
 
-function completePending(result) {
-  if (pending === null) return;
+function completePending(token, result) {
+  if (pending === null || pending.token !== token) return;
   var current = pending;
   pending = null;
   clearTimeout(current.timer);
+  delete callbackRefs[token];
   current.resolve(result);
 }
 
-function observePacket(packetDid, data) {
-  if (closed || pending === null || packetDid.toString() !== did || data === null) return;
+function observePacket(token, packetDid, data, responseBasis) {
+  if (closed || pending === null || pending.token !== token ||
+      packetDid.toString() !== did || data === null) return;
   try {
     var header = decodeHeader(data);
     if (header.type !== pending.type || header.subtype !== pending.subtype) return;
-    completePending({status: 'ok', sent: true, response: base64FromBytes(data)});
+    completePending(token, {
+      status: 'ok', sent: true, response: base64FromBytes(data), response_basis: responseBasis
+    });
   } catch (_) {}
 }
 
-function installRawHook() {
-  var Adapter = Java.use('com.xiaomi.fitness.device.contact.DeviceDataHandlerAdapter');
-  var methods = Adapter.class.getDeclaredMethods();
-  var methodName = null;
-  for (var i = 0; i < methods.length; i += 1) {
-    var params = methods[i].getParameterTypes();
-    if (params.length !== 3) continue;
-    if (params[0].getName().toString() === 'java.lang.String' &&
-        params[1].getName().toString() === 'int' &&
-        params[2].getName().toString() === '[B') {
-      methodName = methods[i].getName().toString();
-      break;
+function requestCallback(token) {
+  var CallbackInterface = Java.use(
+    'com.xiaomi.fitness.device.contact.export.OnSyncCallback'
+  );
+  var PacketSerializer = Java.use('udh');
+  var suffix = Date.now().toString() + Math.floor(Math.random() * 100000).toString();
+  var Callback = Java.registerClass({
+    name: 'org.mibandmcp.runtime.DeviceRequestCallback' + suffix,
+    implements: [CallbackInterface],
+    methods: {
+      onSuccess: function (packetDid, _type, result) {
+        if (pending === null || pending.token !== token) return;
+        try {
+          var code = result === null ? 255 : Number(result.getCode());
+          if (code !== 0) {
+            completePending(token, {status: 'error', sent: true, error: 'device callback code ' + code});
+            return;
+          }
+          var packet = result.getPacket();
+          if (packet !== null) {
+            observePacket(token, packetDid, PacketSerializer.i(packet), 'native_callback_packet');
+          }
+        } catch (error) {
+          completePending(token, {status: 'error', sent: true, error: String(error)});
+        }
+      },
+      onError: function (_packetDid, _type, code) {
+        completePending(token, {status: 'error', sent: true, error: 'device callback error ' + Number(code)});
+      }
     }
-  }
-  if (methodName === null) throw new Error('raw packet callback method is unavailable');
-  rawHook = Adapter[methodName].overload('java.lang.String', 'int', '[B');
-  var originalRaw = rawHook;
-  rawHook.implementation = function (packetDid, channel, data) {
-    var result = originalRaw.call(this, packetDid, channel, data);
-    try { observePacket(packetDid, data); } catch (_) {}
-    return result;
-  };
-}
-
-function restoreRawHook() {
-  if (rawHook === null) return true;
-  try {
-    rawHook.implementation = null;
-    rawHook = null;
-    return true;
-  } catch (_) {
-    return false;
-  }
+  });
+  var callback = Callback.$new();
+  callbackRefs[token] = callback;
+  return callback;
 }
 
 function waitForConnection(timeoutMs) {
@@ -111,7 +118,9 @@ function waitForConnection(timeoutMs) {
       var deadline = Date.now() + timeoutMs;
       Java.scheduleOnMainThread(function () {
         if (closed) return resolve({status: 'closed'});
-        try { manager.connectDevice(); }
+        try {
+          manager.connectDevice.overload('java.lang.String').call(manager, did);
+        }
         catch (error) { return resolve({status: 'error', error: String(error)}); }
         var checking = false;
         var timer = setInterval(function () {
@@ -164,16 +173,17 @@ function begin(retryConnect, timeoutMs) {
                 return 'stop';
               }
               did = model.getDid().toString();
-              var ready = connected()
-                ? Promise.resolve({status: 'ok', reconnect_attempted: false})
-                : retryConnect
-                  ? waitForConnection(timeoutMs)
-                  : Promise.resolve({status: 'not_connected', reconnect_attempted: false});
+              if (connected()) {
+                resolve({status: 'ok', reconnect_attempted: false});
+                return 'stop';
+              }
+              var ready = retryConnect
+                ? waitForConnection(timeoutMs)
+                : Promise.resolve({status: 'not_connected', reconnect_attempted: false});
               ready.then(function (result) {
                 Java.perform(function () {
                   if (result.status !== 'ok' || closed) return resolve(result);
                   try {
-                    installRawHook();
                     resolve(result);
                   } catch (error) {
                     resolve({status: 'error', error: String(error)});
@@ -207,20 +217,22 @@ function request(packetBase64, responseType, responseSubtype, timeoutMs) {
       if (!connected()) return resolve({status: 'not_connected', sent: false});
       if (pending !== null) return resolve({status: 'busy', sent: false, error: 'another packet request is pending'});
       try {
+        var token = nextRequestToken++;
         var timer = setTimeout(function () {
           Java.perform(function () {
-            if (pending === null) return;
-            completePending({status: connected() ? 'timeout' : 'not_connected', sent: true});
+            if (pending === null || pending.token !== token) return;
+            completePending(token, {status: connected() ? 'timeout' : 'not_connected', sent: true});
           });
         }, timeoutMs);
-        pending = {type: responseType, subtype: responseSubtype, resolve: resolve, timer: timer};
+        pending = {token: token, type: responseType, subtype: responseSubtype, resolve: resolve, timer: timer};
+        var callback = requestCallback(token);
         var task = contact.call.overload(
           'java.lang.String', 'int', '[B', 'boolean',
           'com.xiaomi.fitness.device.contact.export.OnSyncCallback', 'int'
-        ).call(contact, did, 101, bytesFromBase64(packetBase64), false, null, timeoutMs);
-        if (task < 0) completePending({status: 'error', sent: false, error: 'Xiaomi Health rejected packet request'});
+        ).call(contact, did, 101, bytesFromBase64(packetBase64), true, callback, timeoutMs);
+        if (task < 0) completePending(token, {status: 'error', sent: false, error: 'Xiaomi Health rejected packet request'});
       } catch (error) {
-        completePending({status: 'error', sent: false, error: String(error)});
+        if (pending !== null) completePending(pending.token, {status: 'error', sent: false, error: String(error)});
       }
     });
   });
@@ -245,10 +257,11 @@ function sendPacket(packetBase64) {
 
 function cleanup() {
   closed = true;
-  if (pending !== null) completePending({status: 'closed', sent: true});
+  if (pending !== null) completePending(pending.token, {status: 'closed', sent: true});
+  callbackRefs = {};
   return new Promise(function (resolve) {
     Java.perform(function () {
-      resolve({status: 'ok', hook_restored: restoreRawHook()});
+      resolve({status: 'ok', hook_restored: true});
     });
   });
 }

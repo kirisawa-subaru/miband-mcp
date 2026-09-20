@@ -12,6 +12,7 @@ from typing import Any, Literal
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import StrictInt
 
 from . import query, sync
 from .settings import Settings
@@ -93,8 +94,14 @@ async def band_status(
         details["satisfied"] = group_fresh and not details["missing"]
         if details["satisfied"]:
             details["status"] = "fresh"
-            if result.get("status") == "partial":
+            scope_errors = [
+                error for error in result.get("errors", [])
+                if isinstance(error, str)
+                and (error.startswith("band:") or error.startswith("monitoring:"))
+            ]
+            if not scope_errors:
                 result["status"] = "ok"
+                result.pop("refresh_error", None)
         if freshness == "require_fresh" and not details["satisfied"]:
             result["status"] = "freshness_unmet"
         result["freshness"] = details
@@ -409,7 +416,8 @@ def create_server(settings: Settings | None = None) -> MCPServer:
     if settings.backend == "xiaomi_health":
         @server.tool(annotations=EDIT, structured_output=True)
         async def set_band_alarm(
-            time: str, weekdays: list[int], enabled: bool = True, alarm_id: int | None = None,
+            time: str, weekdays: list[int], enabled: bool = True,
+            alarm_id: StrictInt | None = None,
             timezone: str | None = None, timeout_seconds: int = 30,
         ) -> dict[str, Any]:
             """Create or update one band alarm, preserving other alarms and verifying by read-back.
@@ -433,7 +441,8 @@ def create_server(settings: Settings | None = None) -> MCPServer:
         async def set_band_reminder(
             at: str, title: str,
             repeat: Literal["once", "daily", "weekly", "monthly", "yearly"] = "once",
-            reminder_id: int | None = None, timezone: str | None = None, timeout_seconds: int = 30,
+            reminder_id: StrictInt | None = None,
+            timezone: str | None = None, timeout_seconds: int = 30,
         ) -> dict[str, Any]:
             """Create or update one wrist reminder, then verify its actual stored fields.
 
@@ -454,7 +463,7 @@ def create_server(settings: Settings | None = None) -> MCPServer:
     if settings.backend == "xiaomi_health":
         @server.tool(annotations=EDIT, structured_output=True)
         async def delete_band_schedule(
-            kind: Literal["alarm", "reminder"], item_id: int,
+            kind: Literal["alarm", "reminder"], item_id: StrictInt,
             timezone: str | None = None, timeout_seconds: int = 30,
         ) -> dict[str, Any]:
             """Delete only the identified band alarm/reminder and verify its absence by read-back.
@@ -471,7 +480,7 @@ def create_server(settings: Settings | None = None) -> MCPServer:
                 )
 
     @server.resource("health://status")
-    def health_status() -> str:
+    def health_status_resource() -> str:
         """Last sync result without contacting the phone."""
         return json.dumps(sync.read_sync_status(settings), ensure_ascii=False)
 

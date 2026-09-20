@@ -136,6 +136,19 @@ def factory_for(session: FakeSession):
 
 
 class ScheduleCodecTests(unittest.TestCase):
+    def test_alarm_and_reminder_ids_may_start_at_zero(self) -> None:
+        alarm = s._parse_alarm(alarm_message(0, 5, 27))
+        reminder = s._parse_reminder(
+            reminder_message(0, datetime(2030, 1, 6, 16, 30, tzinfo=timezone.utc), "Temp")
+        )
+        self.assertEqual(alarm.item_id, 0)
+        self.assertEqual(reminder.item_id, 0)
+        self.assertEqual(s._validate_id(0, "item_id"), 0)
+
+    def test_parse_command_defaults_omitted_subtype_to_zero(self) -> None:
+        response = s._uint(1, s.COMMAND_TYPE) + s._bytes(s.SCHEDULE_FIELD, b"")
+        self.assertEqual(s._parse_command(response, s.ALARMS_GET), (b"", None))
+
     def test_alarm_details_matches_protobuf_golden_bytes(self) -> None:
         encoded = s._encode_alarm_details(
             7, 30, s.REPEAT_WEEKLY, 0x1F, True, s.NORMAL_ALARM

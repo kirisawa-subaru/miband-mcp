@@ -178,17 +178,17 @@ class BackgroundDeviceSyncTests(unittest.TestCase):
             self.hook_restored = hook_restored
             self.cleanup_calls = 0
 
-        def begin(self):
-            for payload in (
-                {"phase": "request", "last_sync_time_before": 100},
-                {"phase": "start"},
-            ):
+        def begin(self, _timeout_ms=30000):
+            for payload in ({"phase": "request", "last_sync_time_before": 100},):
                 self.script.callback({"type": "send", "payload": payload}, None)
             if self.finish:
                 self.script.callback(
                     {"type": "send", "payload": {
-                        "phase": "finish", "code": 0,
+                        "phase": "finish",
                         "last_sync_time_after": 200,
+                        "model_status_after": 7,
+                        "is_connected_after": True,
+                        "is_idle_after": True,
                     }}, None,
                 )
 
@@ -196,7 +196,7 @@ class BackgroundDeviceSyncTests(unittest.TestCase):
             self.cleanup_calls += 1
             self.script.callback(
                 {"type": "send", "payload": {
-                    "phase": "cleanup_done", "hook_restored": self.hook_restored,
+                    "phase": "cleanup_done", "resources_cleaned": True,
                 }}, None,
             )
 
@@ -239,26 +239,25 @@ class BackgroundDeviceSyncTests(unittest.TestCase):
         def attach(self, _pid):
             return self.session
 
-    def test_script_waits_for_full_finish_and_restores_hook_before_detach(self):
+    def test_script_waits_for_native_time_advance_before_detach(self):
         device = self.FakeDevice()
         collector = background_sync._run_sync_script(
             device, 123, time.monotonic() + 1, cleanup_seconds=0.1
         )
         self.assertTrue(collector.requested)
-        self.assertTrue(collector.start_seen)
-        self.assertEqual(collector.finish_code, 0)
-        self.assertTrue(collector.hook_restored)
+        self.assertEqual(collector.last_sync_time_after, 200)
+        self.assertTrue(collector.cleanup_done.is_set())
         self.assertEqual(device.session.script.exports_sync.cleanup_calls, 1)
         self.assertTrue(device.session.script.unloaded)
         self.assertTrue(device.session.detached)
 
-    def test_timeout_still_restores_hook_before_unload(self):
+    def test_timeout_still_cleans_runtime_before_unload(self):
         device = self.FakeDevice(finish=False)
         collector = background_sync._run_sync_script(
             device, 123, time.monotonic() + 0.04, cleanup_seconds=0.01
         )
         self.assertIn("timed out", " ".join(collector.errors))
-        self.assertTrue(collector.hook_restored)
+        self.assertTrue(collector.cleanup_done.is_set())
         self.assertEqual(device.session.script.exports_sync.cleanup_calls, 1)
         self.assertTrue(device.session.script.unloaded)
         self.assertTrue(device.session.detached)
@@ -266,13 +265,13 @@ class BackgroundDeviceSyncTests(unittest.TestCase):
     def test_success_requires_full_finish_and_clean_runtime(self):
         transport = {
             "requested": True,
-            "start_seen": True,
-            "finish_code": 0,
             "completed_at": "2026-09-21T13:00:00.000+00:00",
-            "last_progress": 100,
             "last_sync_time_before": 100,
             "last_sync_time_after": 200,
-            "hook_restored": True,
+            "final_model_status": 7,
+            "final_is_connected": True,
+            "final_is_idle": True,
+            "cleanup_done": True,
             "errors": [],
             "cleanup_errors": [],
         }
@@ -283,54 +282,54 @@ class BackgroundDeviceSyncTests(unittest.TestCase):
         self.assertTrue(result["confirmed"])
         self.assertEqual(result["mode"], "background_device_api")
         self.assertFalse(result["ui_interaction"])
-        self.assertEqual(result["confirmation_basis"], "SyncObservers.onFinish")
+        self.assertEqual(result["confirmation_basis"], "native_last_sync_time_and_device_state")
 
     def test_failed_finish_raises_so_outer_sync_cannot_report_ok(self):
         transport = {
             "requested": True,
-            "start_seen": True,
-            "finish_code": -1,
             "completed_at": "2026-09-21T13:00:00.000+00:00",
-            "last_progress": None,
             "last_sync_time_before": 100,
             "last_sync_time_after": 100,
-            "hook_restored": True,
+            "final_model_status": 7,
+            "final_is_connected": True,
+            "final_is_idle": True,
+            "cleanup_done": True,
             "errors": [],
             "cleanup_errors": [],
         }
         with mock.patch.object(background_sync, "_health_pid", return_value=123), mock.patch.object(
             background_sync, "_sync_via_frida", return_value=transport
-        ), self.assertRaisesRegex(RuntimeError, "code -1"):
+        ), self.assertRaisesRegex(RuntimeError, "did not advance"):
             background_sync.sync_device_in_background("phone", timeout_seconds=20)
 
     def test_finish_without_this_requests_start_is_rejected(self):
         transport = {
             "requested": True,
-            "start_seen": False,
-            "finish_code": 0,
             "completed_at": "2026-09-21T13:00:00.000+00:00",
-            "last_progress": None,
             "last_sync_time_before": 100,
             "last_sync_time_after": 200,
-            "hook_restored": True,
+            "final_model_status": 6,
+            "final_is_connected": True,
+            "final_is_idle": True,
+            "cleanup_done": True,
             "errors": [],
             "cleanup_errors": [],
         }
         with mock.patch.object(background_sync, "_health_pid", return_value=123), mock.patch.object(
             background_sync, "_sync_via_frida", return_value=transport
-        ), self.assertRaisesRegex(RuntimeError, "start was not observed"):
+        ), self.assertRaisesRegex(RuntimeError, "non-ready"):
             background_sync.sync_device_in_background("phone", timeout_seconds=20)
 
     def test_hook_callback_exception_is_rejected(self):
         transport = {
             "requested": True,
-            "start_seen": True,
-            "finish_code": 0,
             "completed_at": "2026-09-21T13:00:00.000+00:00",
-            "last_progress": None,
             "last_sync_time_before": 100,
             "last_sync_time_after": 200,
-            "hook_restored": True,
+            "final_model_status": 7,
+            "final_is_connected": True,
+            "final_is_idle": True,
+            "cleanup_done": True,
             "errors": ["hook callback failed"],
             "cleanup_errors": [],
         }
@@ -349,15 +348,12 @@ class BackgroundDeviceSyncTests(unittest.TestCase):
         self.assertEqual(result, expected)
         invoke.assert_called_once_with("phone", timeout_seconds=60.0)
 
-    def test_unconfirmed_hook_restoration_is_a_hard_failure(self):
-        device = self.FakeDevice(hook_restored=False)
+    def test_runtime_cleanup_is_recorded(self):
+        device = self.FakeDevice()
         collector = background_sync._run_sync_script(
             device, 123, time.monotonic() + 1, cleanup_seconds=0.1
         )
-        self.assertFalse(collector.hook_restored)
-        self.assertIn("hook restoration was not confirmed", " ".join(collector.errors))
-        # Frida unload is the bounded second restoration mechanism; the
-        # operation still cannot claim success without explicit confirmation.
+        self.assertTrue(collector.cleanup_done.is_set())
         self.assertTrue(device.session.script.unloaded)
         self.assertTrue(device.session.detached)
 
@@ -427,7 +423,7 @@ console.log(JSON.stringify({
         self.assertEqual(result["lateResult"], "stop")
         self.assertEqual(result["syncCalls"], 0)
         self.assertFalse(result["requested"])
-        self.assertEqual(result["cleanup"], {"phase": "cleanup_done", "hook_restored": True})
+        self.assertEqual(result["cleanup"], {"phase": "cleanup_done", "resources_cleaned": True})
 
 
 class SyncTests(unittest.TestCase):

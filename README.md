@@ -28,7 +28,7 @@
 | 后端 | 数据通道 | 接口 |
 |---|---|---|
 | Gadgetbridge | 已授权 ADB、App 导出、电脑 SQLite 缓存 | 最近状态、日报、明细、同步 |
-| 小米运动健康（实验） | 已有 root/SSH 环境、官方 App 数据库与内部接口 | 查询、同步及设备控制；内部接口受 App 版本影响，部分控制仍待实机验收 |
+| 小米运动健康（实验） | 已有 root/SSH 环境、官方 App 数据库与内部接口 | 查询、后台同步及设备控制已在指定版本实机验收；佩戴、睡眠和活动状态仍返回 unknown，App 升级后需重新验收 |
 
 - [Gadgetbridge 安装与配置](doc/gadgetbridge-mcp.md)
 - [手机安装实测与已知体验问题](doc/gadgetbridge-e2e.md)

@@ -104,6 +104,29 @@ class FreshnessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["monitoring"]["heart_rate"]["interval_minutes"], 10)
         self.assertEqual(read.call_args.kwargs["freshness"], "cached")
 
+    async def test_band_status_ignores_person_freshness_failure(self):
+        snapshot = {
+            "status": "freshness_unmet",
+            "band": {
+                "connected": True,
+                "freshness": {"status": "fresh", "missing": []},
+            },
+            "monitoring": {
+                "heart_rate": {"enabled": True},
+                "freshness": {"status": "fresh", "missing": []},
+            },
+            "person": {"freshness": {"status": "unknown", "missing": ["person.state"]}},
+            "errors": ["state: device response timed out"],
+            "refresh_error": "required device snapshot is incomplete or stale",
+            "freshness": {"status": "partial", "missing": ["person.state"]},
+        }
+        with patch("mibandctl.health.server._device_snapshot", return_value=snapshot):
+            result = await band_status(self.settings, "require_fresh")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["freshness"]["status"], "fresh")
+        self.assertNotIn("refresh_error", result)
+        self.assertEqual(result["errors"], ["state: device response timed out"])
+
     async def test_schedule_unknown_outcome_remains_structured_and_not_retry_safe(self):
         outcome = {"status": "outcome_unknown", "retry_safe": False, "readback_confirmed": False}
         with patch("mibandctl.health.schedules.set_band_alarm", return_value=outcome) as write:
@@ -123,6 +146,20 @@ class FreshnessTests(unittest.IsolatedAsyncioTestCase):
                     "at": "2026-09-22T08:30:00", "title": "Test reminder",
                 })
         self.assertTrue(result.is_error)
+        contact.assert_not_called()
+
+    async def test_schedule_ids_reject_boolean_before_contacting_device(self):
+        with patch("mibandctl.health.device_transport.device_session") as contact:
+            async with Client(create_server(self.settings)) as client:
+                deleted = await client.call_tool(
+                    "delete_band_schedule", {"kind": "alarm", "item_id": False}
+                )
+                updated = await client.call_tool(
+                    "set_band_alarm",
+                    {"time": "08:30", "weekdays": [], "alarm_id": False},
+                )
+        self.assertTrue(deleted.is_error)
+        self.assertTrue(updated.is_error)
         contact.assert_not_called()
 
 

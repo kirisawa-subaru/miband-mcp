@@ -106,6 +106,60 @@ process.stdout.write(JSON.stringify(sandbox.decodeHeader([26, 1, 0, 8, 2, 16, 78
         )
         self.assertEqual(json.loads(completed.stdout), {"type": 2, "subtype": 78})
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the JS parser check")
+    def test_js_header_decoder_defaults_omitted_subtype_to_zero(self) -> None:
+        script_path = Path(device_transport.__file__).with_name("device_transport.js")
+        harness = """
+const fs = require('fs');
+const vm = require('vm');
+const sandbox = {rpc: {exports: {}}, Java: {}};
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), sandbox);
+process.stdout.write(JSON.stringify(sandbox.decodeHeader([8, 17])));
+"""
+        completed = subprocess.run(
+            ["node", "-e", harness, str(script_path)], check=True,
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(json.loads(completed.stdout), {"type": 17, "subtype": 0})
+
+    def test_js_uses_native_callback_packet_and_response_request(self) -> None:
+        source = Path(device_transport.__file__).with_name("device_transport.js").read_text()
+        request_section = source[source.index("function request("):source.index("function sendPacket(")]
+        send_section = source[source.index("function sendPacket("):source.index("function cleanup(")]
+        self.assertIn("bytesFromBase64(packetBase64), true, callback, timeoutMs", request_section)
+        self.assertIn("result.getPacket()", source)
+        self.assertIn("PacketSerializer.i(packet)", source)
+        self.assertIn("pending.token !== token", source)
+        self.assertNotIn(".implementation =", source)
+        self.assertIn("bytesFromBase64(packetBase64), false, null, 8000", send_section)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the JS token check")
+    def test_js_late_callback_cannot_complete_a_newer_request(self) -> None:
+        script_path = Path(device_transport.__file__).with_name("device_transport.js")
+        harness = """
+const fs = require('fs');
+const vm = require('vm');
+const sandbox = {rpc: {exports: {}}, Java: {}, clearTimeout: function () {}};
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[1], 'utf8'), sandbox);
+sandbox.callbackRefs = {1: 'old', 2: 'current'};
+sandbox.pending = {token: 2, timer: 17, resolve: function (value) { sandbox.result = value; }};
+sandbox.completePending(1, {status: 'late'});
+if (sandbox.pending.token !== 2 || sandbox.result !== undefined) process.exit(2);
+sandbox.completePending(2, {status: 'ok'});
+process.stdout.write(JSON.stringify({pending: sandbox.pending, result: sandbox.result,
+  oldRef: sandbox.callbackRefs[1], currentRef: sandbox.callbackRefs[2]}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", harness, str(script_path)], check=True,
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {"pending": None, "result": {"status": "ok"}, "oldRef": "old"},
+        )
+
 
 class SessionTests(unittest.TestCase):
     def settings(self, root: Path) -> Settings:

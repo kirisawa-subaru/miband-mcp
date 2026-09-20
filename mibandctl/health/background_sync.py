@@ -25,13 +25,14 @@ class _SyncCollector:
         self.finished = threading.Event()
         self.cleanup_done = threading.Event()
         self.requested = False
-        self.start_seen = False
-        self.finish_code: int | None = None
-        self.last_progress: int | None = None
         self.completed_at: str | None = None
         self.last_sync_time_before: int | None = None
         self.last_sync_time_after: int | None = None
-        self.hook_restored = False
+        self.final_model_status: int | None = None
+        self.final_is_connected: bool | None = None
+        self.final_is_idle: bool | None = None
+        self.elapsed_ms: int | None = None
+        self.state_history: list[dict[str, Any]] = []
         self.reconnect_attempted = False
         self.reconnect_succeeded = False
         self.errors: list[str] = []
@@ -62,25 +63,29 @@ class _SyncCollector:
             value = payload.get("last_sync_time_before")
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 self.last_sync_time_before = int(value)
-        elif phase == "start":
-            self.start_seen = True
-        elif phase == "progress":
-            value = payload.get("value")
-            if isinstance(value, int) and not isinstance(value, bool):
-                self.last_progress = value
+        elif phase == "state":
+            state = payload.get("state")
+            if isinstance(state, dict) and len(self.state_history) < 12:
+                self.state_history.append(state)
         elif phase == "finish":
-            code = payload.get("code")
-            if isinstance(code, int) and not isinstance(code, bool):
-                self.finish_code = code
             value = payload.get("last_sync_time_after")
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 self.last_sync_time_after = int(value)
+            for attr, key in (("final_model_status", "model_status_after"),
+                              ("final_is_connected", "is_connected_after"),
+                              ("final_is_idle", "is_idle_after"),
+                              ("elapsed_ms", "elapsed_ms")):
+                if payload.get(key) is not None:
+                    setattr(self, attr, payload[key])
             self.completed_at = _now_iso()
-            if not self.start_seen:
-                self._error("ignored sync finish that did not follow this request's start")
+            self.finished.set()
+        elif phase == "sync_timeout":
+            state = payload.get("state")
+            if isinstance(state, dict) and len(self.state_history) < 12:
+                self.state_history.append(state)
+            self._error("timed out waiting for Xiaomi Health device sync completion")
             self.finished.set()
         elif phase == "cleanup_done":
-            self.hook_restored = payload.get("hook_restored") is True
             self.cleanup_done.set()
         elif phase in {"busy", "not_connected", "manager_missing", "setup_error", "cancelled"}:
             self._error(payload.get("error") or phase)
@@ -111,7 +116,7 @@ def _run_sync_script(
             script.on("message", collector.handle)
             script.load()
             script_loaded = True
-            script.exports_sync.begin()
+            script.exports_sync.begin(max(1000, int((active_deadline - time.monotonic()) * 1000)))
             if not collector.finished.wait(max(0.1, active_deadline - time.monotonic())):
                 timed_out = True
     except Exception as exc:
@@ -125,8 +130,8 @@ def _run_sync_script(
             except Exception as exc:
                 collector._error(f"sync listener cleanup failed: {exc}")
             collector.cleanup_done.wait(max(0.0, cleanup_deadline - time.monotonic()))
-        if not collector.cleanup_done.is_set() or not collector.hook_restored:
-            collector._error("sync callback hook restoration was not confirmed")
+        if not collector.cleanup_done.is_set():
+            collector._error("sync runtime cleanup was not confirmed")
         if timed_out:
             collector._error("timed out waiting for Xiaomi Health device sync completion")
         if script is not None:
@@ -175,13 +180,18 @@ def _sync_via_frida(host: str, app_pid: int, deadline: float) -> dict[str, Any]:
         collector._error(transport_error or "background sync script did not start")
     return {
         "requested": collector.requested,
-        "start_seen": collector.start_seen,
-        "finish_code": collector.finish_code,
+        "start_seen": False,
+        "finish_code": None,
         "completed_at": collector.completed_at,
-        "last_progress": collector.last_progress,
+        "last_progress": None,
         "last_sync_time_before": collector.last_sync_time_before,
         "last_sync_time_after": collector.last_sync_time_after,
-        "hook_restored": collector.hook_restored,
+        "cleanup_done": collector.cleanup_done.is_set(),
+        "final_model_status": collector.final_model_status,
+        "final_is_connected": collector.final_is_connected,
+        "final_is_idle": collector.final_is_idle,
+        "elapsed_ms": collector.elapsed_ms,
+        "state_history": collector.state_history,
         "errors": collector.errors,
         "cleanup_errors": runtime.cleanup_errors,
         "reconnect_attempted": collector.reconnect_attempted,
@@ -206,9 +216,13 @@ def sync_device_in_background(host: str, *, timeout_seconds: float) -> dict[str,
     cleanup_errors = [str(value) for value in result.get("cleanup_errors", []) if value]
     confirmed = (
         result.get("requested") is True
-        and result.get("start_seen") is True
-        and result.get("finish_code") == 0
-        and result.get("hook_restored") is True
+        and isinstance(result.get("last_sync_time_before"), int)
+        and isinstance(result.get("last_sync_time_after"), int)
+        and result["last_sync_time_after"] > result["last_sync_time_before"]
+        and result.get("final_model_status") == 7
+        and result.get("final_is_connected") is True
+        and result.get("final_is_idle") is True
+        and result.get("cleanup_done") is True
         and not errors
         and not cleanup_errors
     )
@@ -219,26 +233,33 @@ def sync_device_in_background(host: str, *, timeout_seconds: float) -> dict[str,
             detail = cleanup_errors[0]
         elif result.get("requested") is not True:
             detail = "background device sync request was not sent"
-        elif result.get("start_seen") is not True:
-            detail = "background device sync start was not observed"
-        elif result.get("finish_code") != 0:
-            detail = f"background device sync finished with code {result.get('finish_code')}"
+        elif not isinstance(result.get("last_sync_time_before"), int) or not isinstance(result.get("last_sync_time_after"), int) or result["last_sync_time_after"] <= result["last_sync_time_before"]:
+            detail = "background device sync did not advance last sync time"
+        elif result.get("final_model_status") != 7:
+            detail = "background device sync ended with non-ready device status"
+        elif result.get("final_is_connected") is not True:
+            detail = "background device sync ended disconnected"
+        elif result.get("final_is_idle") is not True:
+            detail = "background device sync ended with a busy engine"
         else:
-            detail = "background device sync callback hook restoration was not confirmed"
+            detail = "background device sync runtime cleanup was not confirmed"
         raise RuntimeError(_bounded_error(detail))
     return {
         "requested": True,
         "confirmed": True,
         "mode": "background_device_api",
         "ui_interaction": False,
-        "confirmation_basis": "SyncObservers.onFinish",
-        "completion_code": 0,
+        "confirmation_basis": "native_last_sync_time_and_device_state",
         "sync_requested_at": requested_at,
         "completed_at": result["completed_at"],
-        "last_progress": result["last_progress"],
+        "last_progress": None,
         "last_sync_time_before": result["last_sync_time_before"],
         "last_sync_time_after": result["last_sync_time_after"],
-        "hook_restored": True,
+        "cleanup_done": True,
+        "final_model_status": result["final_model_status"],
+        "final_is_connected": True,
+        "final_is_idle": True,
+        "state_history": result.get("state_history", []),
         "cleanup_errors": [],
         "reconnect": {
             "attempted": bool(result.get("reconnect_attempted")),

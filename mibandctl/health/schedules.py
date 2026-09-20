@@ -248,8 +248,6 @@ def _parse_hour_minute(data: bytes) -> tuple[int, int, bytes]:
 def _parse_alarm(data: bytes) -> _Alarm:
     fields = _decode_fields(data)
     item_id = _required_varint(fields, 1, "alarm id")
-    if item_id < 1:
-        raise ScheduleProtocolError("alarm id must start at 1")
     details_data = _required_message(fields, 2, "alarm details")
     details = _decode_fields(details_data)
     hour, minute, time_unknown = _parse_hour_minute(
@@ -306,8 +304,6 @@ def _parse_time(data: bytes) -> tuple[int, int, int, int, bytes]:
 def _parse_reminder(data: bytes) -> _Reminder:
     fields = _decode_fields(data)
     item_id = _required_varint(fields, 1, "reminder id")
-    if item_id < 1:
-        raise ScheduleProtocolError("reminder id must start at 1")
     details_data = _required_message(fields, 2, "reminder details")
     details = _decode_fields(details_data)
     year, month, day, date_unknown = _parse_date(
@@ -366,7 +362,7 @@ def _ensure_unique_ids(items: Iterable[_Alarm | _Reminder], kind: str) -> None:
 def _parse_command(response: bytes, subtype: int) -> tuple[bytes, int | None]:
     fields = _decode_fields(response)
     command_type = _required_varint(fields, 1, "command type")
-    command_subtype = _required_varint(fields, 2, "command subtype")
+    command_subtype = _varint(fields, 2, 0)
     if command_type != COMMAND_TYPE or command_subtype != subtype:
         raise ScheduleProtocolError(
             f"unexpected command {command_type}/{command_subtype}, expected {COMMAND_TYPE}/{subtype}"
@@ -518,8 +514,8 @@ def _validate_timeout(timeout_seconds: int) -> int:
 
 
 def _validate_id(item_id: int, label: str) -> int:
-    if isinstance(item_id, bool) or not isinstance(item_id, int) or not 1 <= item_id <= MAX_UINT32:
-        raise ValueError(f"{label} must be an integer between 1 and {MAX_UINT32}")
+    if isinstance(item_id, bool) or not isinstance(item_id, int) or not 0 <= item_id <= MAX_UINT32:
+        raise ValueError(f"{label} must be an integer between 0 and {MAX_UINT32}")
     return item_id
 
 

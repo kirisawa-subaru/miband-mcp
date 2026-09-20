@@ -4,9 +4,7 @@ var contact = null;
 var did = null;
 var begun = false;
 var closed = false;
-var sawStart = false;
-var startHook = null;
-var finishHook = null;
+var pollTimer = null;
 
 function ensureConnected(manager, model, callback) {
   if (model !== null && model.isDeviceConnected()) return callback(true);
@@ -43,75 +41,28 @@ function ensureConnected(manager, model, callback) {
   });
 }
 
-function restoreHooks() {
-  var restored = true;
-  if (startHook !== null) {
-    try { startHook.implementation = null; } catch (_) { restored = false; }
-  }
-  if (finishHook !== null) {
-    try { finishHook.implementation = null; } catch (_) { restored = false; }
-  }
-  if (restored) {
-    startHook = null;
-    finishHook = null;
-  }
-  return restored;
-}
-
 function reportError(error) {
-  try { send({phase: 'setup_error', error: String(error)}); } catch (_) {}
+  try { send({phase: 'setup_error', error: String(error), stack: error && error.stack ? String(error.stack) : null}); } catch (_) {}
 }
 
 function cleanup() {
   // Close synchronously so queued Java.perform/choose callbacks cannot start
   // work after cleanup has already reported success.
   closed = true;
+  if (pollTimer !== null) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
   Java.perform(function () {
-    send({phase: 'cleanup_done', hook_restored: restoreHooks()});
+    send({phase: 'cleanup_done', resources_cleaned: true});
   });
   return true;
 }
 
-function installHooks() {
-  var SyncObservers = Java.use('com.xiaomi.fitness.device.contact.SyncObservers');
-  startHook = SyncObservers.onStart.overload(
-    'com.xiaomi.fitness.device.manager.export.WearableDeviceModel'
-  );
-  finishHook = SyncObservers.onFinish.overload(
-    'com.xiaomi.fitness.device.manager.export.WearableDeviceModel', 'int'
-  );
-  var originalStart = startHook;
-  var originalFinish = finishHook;
-
-  startHook.implementation = function (model) {
-    var result = originalStart.call(this, model);
-    try {
-      if (!closed && model !== null && model.getDid().toString() === did) {
-        sawStart = true;
-        send({phase: 'start'});
-      }
-    } catch (error) { reportError(error); }
-    return result;
-  };
-
-  finishHook.implementation = function (model, code) {
-    var result = originalFinish.call(this, model, code);
-    try {
-      if (!closed && sawStart && model !== null && model.getDid().toString() === did) {
-        send({
-          phase: 'finish',
-          code: code,
-          last_sync_time_after: Number(contact.getLastSyncDataTime())
-        });
-      }
-    } catch (error) { reportError(error); }
-    return result;
-  };
-}
-
-function begin() {
+function begin(timeoutMs) {
   if (begun) throw new Error('background sync already requested');
   begun = true;
+  timeoutMs = timeoutMs || 30000;
   Java.perform(function () {
     if (closed) {
       send({phase: 'cancelled', error: 'background sync was cancelled before setup'});
@@ -149,31 +100,65 @@ function begin() {
                 if (!closed) send({phase: 'not_connected', error: 'wearable is not connected'});
                 return;
               }
-              installHooks();
-              if (closed) {
-                restoreHooks();
-                return;
-              }
               Java.scheduleOnMainThread(function () {
                 if (closed) return;
+                var startedAt = Date.now();
                 try {
+                  var lastSyncTimeBefore = Number(contact.getLastSyncDataTime());
                   send({
                     phase: 'request',
-                    last_sync_time_before: Number(contact.getLastSyncDataTime()),
+                    last_sync_time_before: lastSyncTimeBefore,
+                    model_status_before: Number(model.getDeviceStatus()),
+                    is_connected_before: !!model.isDeviceConnected(),
+                    is_idle_before: !!contact.isIDLE(),
                     is_auto: false
                   });
                   if (closed) return;
                   contact.syncData.overload('java.lang.String', 'boolean').call(
                     contact, did, false
                   );
+                  var lastState = null;
+                  pollTimer = setInterval(function () {
+                    Java.perform(function () {
+                      if (closed) return;
+                      try {
+                        var lastSync = Number(contact.getLastSyncDataTime());
+                        var state = {
+                          last_sync_time: lastSync,
+                          model_status: Number(model.getDeviceStatus()),
+                          is_connected: !!model.isDeviceConnected(),
+                          is_idle: !!contact.isIDLE()
+                        };
+                        if (lastState === null || JSON.stringify(state) !== JSON.stringify(lastState)) {
+                          send({phase: 'state', state: state});
+                          lastState = state;
+                        }
+                        if (lastSync > Number(lastSyncTimeBefore)) {
+                          clearInterval(pollTimer);
+                          pollTimer = null;
+                          send({phase: 'finish', last_sync_time_after: lastSync,
+                            model_status_after: state.model_status,
+                            is_connected_after: state.is_connected,
+                            is_idle_after: state.is_idle,
+                            elapsed_ms: Date.now() - startedAt});
+                        } else if (Date.now() - startedAt >= timeoutMs) {
+                          clearInterval(pollTimer);
+                          pollTimer = null;
+                          send({phase: 'sync_timeout', state: state});
+                        }
+                      } catch (error) {
+                        clearInterval(pollTimer);
+                        pollTimer = null;
+                        reportError(error);
+                      }
+                    });
+                  }, 250);
                 } catch (error) {
-                  restoreHooks();
                   reportError(error);
                 }
               });
             });
           } catch (error) {
-            restoreHooks();
             reportError(error);
           }
           return 'stop';
@@ -185,7 +170,6 @@ function begin() {
         }
       });
     } catch (error) {
-      restoreHooks();
       reportError(error);
     }
   });
