@@ -18,6 +18,11 @@ dependencies = [
 [project.optional-dependencies]
 xiaomi = ["frida==16.7.19"]
 
+[project.urls]
+Repository = "https://github.com/kirisawa-subaru/miband-mcp"
+Documentation = "https://github.com/kirisawa-subaru/miband-mcp/blob/main/README.md"
+Issues = "https://github.com/kirisawa-subaru/miband-mcp/issues"
+
 [project.scripts]
 mibandctl = "mibandctl.__main__:main"
 miband-health = "mibandctl.health.cli:main"
