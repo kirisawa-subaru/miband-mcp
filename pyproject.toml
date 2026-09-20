@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mibandctl"
+version = "0.2.0"
+description = "Mi Band health-data MCP and CLI for Xiaomi Health and Gadgetbridge"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE", "NOTICE"]
+classifiers = ["Development Status :: 3 - Alpha"]
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=2.2.0,<3",
+]
+
+[project.optional-dependencies]
+xiaomi = ["frida==16.7.19"]
+
+[project.scripts]
+mibandctl = "mibandctl.__main__:main"
+miband-health = "mibandctl.health.cli:main"
+miband-health-mcp = "mibandctl.health.server:main"
+
+[tool.setuptools.packages.find]
+include = ["mibandctl*"]
+
+[tool.setuptools.package-data]
+"mibandctl.health" = ["measure.js", "sync_device.js", "device_transport.js"]

@@ -1,0 +1,36 @@
+MiBand MCP
+Copyright (C) 2026 MiBand MCP contributors
+Licensed under the GNU Affero General Public License, version 3 or later.
+See LICENSE for the full license text.
+
+Gadgetbridge interoperability references
+---------------------------------------
+Project: https://codeberg.org/Freeyourgadget/Gadgetbridge
+Mirror: https://github.com/Freeyourgadget/Gadgetbridge
+Authors: Gadgetbridge contributors, including Jose Rebelo
+Upstream license: GNU Affero General Public License, version 3 or later
+
+This project reads Gadgetbridge SQLite exports and uses its public Intent API.
+Its Xiaomi mappings and Python/JavaScript protocol implementations were informed
+by Gadgetbridge's XiaomiHealthService, XiaomiScheduleService, xiaomi.proto,
+SleepDetailsParser, DailySummaryParser and database entity definitions.
+These are interoperability references; the Gadgetbridge application, source
+checkout, generated protocol classes, APKs, icons and artwork are not bundled.
+
+The Python schedule implementation is maintained in
+mibandctl/health/schedules.py; upstream references explain protocol values,
+while local locking, read-back verification and error handling are implemented
+in this repository. This project is independent of Xiaomi and Gadgetbridge.
+
+Runtime dependencies
+--------------------
+The MCP Python SDK is installed as a dependency from its own distribution:
+https://github.com/modelcontextprotocol/python-sdk
+
+The optional Xiaomi Health backend uses Frida. Its runtime installer downloads
+a pinned, checksum-verified binary from the official Frida release; the binary
+is not included in this repository or its source archive:
+https://github.com/frida/frida
+
+Those projects retain their own licenses and copyright notices. See their
+respective distributions for the applicable terms.

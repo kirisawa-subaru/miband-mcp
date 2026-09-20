@@ -1,0 +1,15 @@
+[Unit]
+Description=Pull Xiaomi Health records into the local health cache
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/development/MiBand-connection
+ExecStart=%h/development/MiBand-connection/.venv/bin/miband-health sync --timeout 120
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=MIBAND_HEALTH_CONFIG=%h/.config/miband-health/xiaomi.json
+UMask=0077
+TimeoutStartSec=150
+Nice=10
+StandardOutput=null
+StandardError=journal

@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh the local Mi Band health cache every five minutes
+
+[Timer]
+OnStartupSec=2min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=15
+Unit=miband-health-sync.service
+
+[Install]
+WantedBy=timers.target
