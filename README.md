@@ -4,6 +4,14 @@
 
 当前为首个公开测试版本（alpha）。主要验通路线是国内版安卓手机、Gadgetbridge、USB 和 Linux 电脑；其他平台及无线方式以各文档的验证范围为准。
 
+使用效果如下： 
+<img width="1267" height="551" alt="image" src="https://github.com/user-attachments/assets/042ce8ba-3d43-4bea-afce-a5cd912b1744" />
+
+<img width="1468" height="480" alt="image" src="https://github.com/user-attachments/assets/0dd89461-bb66-4670-8b37-55ad51adae71" />
+
+<img width="1258" height="866" alt="image" src="https://github.com/user-attachments/assets/de649619-9000-464a-9527-1461385ba049" />
+
+
 ## 让 agent 帮你配置
 
 把本仓库交给能够操作电脑的 agent，并请它读取 [配置 skill](skills/miband-setup/SKILL.md)。它会检查设备、解释需要的选择，完成电脑配置，并逐步引导手机操作。也可以选择让 agent 帮忙操作手机；配对确认仍由你在手机和手环上完成。
